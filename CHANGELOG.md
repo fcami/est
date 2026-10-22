@@ -4,6 +4,9 @@
 ### Added
 - Optional `enroll_basic_auth` section in the estserver configuration file,
   which requires HTTP Basic Authentication for `/simpleenroll`.
+- estserver logs whether an Authorization header and a TLS client certificate
+  were presented with each request that reaches the Basic authentication
+  check, for use by client test suites.
 
 ## [1.0.6] - 2021-02-21
 ### Added

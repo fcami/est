@@ -211,7 +211,7 @@ func main() {
 		AllowedHosts:   cfg.AllowedHosts,
 		Timeout:        time.Duration(cfg.Timeout) * time.Second,
 		RateLimit:      cfg.RateLimit,
-		CheckBasicAuth: newCheckBasicAuth(cfg),
+		CheckBasicAuth: logClientAuth(newCheckBasicAuth(cfg)),
 	})
 	if err != nil {
 		log.Fatalf("failed to create new EST router: %v", err)
@@ -268,5 +268,29 @@ func newCheckBasicAuth(
 		}
 
 		return nil
+	}
+}
+
+// logClientAuth returns a function which logs whether an Authorization header
+// and a TLS client certificate were presented with a request, and then calls
+// next. The password is never logged. The function must be used as the
+// CheckBasicAuth callback, so that the library's request logger is in the
+// context.
+func logClientAuth(
+	next func(ctx context.Context, r *http.Request, aps, username, password string) error,
+) func(ctx context.Context, r *http.Request, aps, username, password string) error {
+	return func(ctx context.Context, r *http.Request, aps, username, password string) error {
+		var subject string
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			subject = r.TLS.PeerCertificates[0].Subject.String()
+		}
+
+		est.LoggerFromContext(ctx).Infow("Client authentication",
+			"Authorization Presented", r.Header.Get("Authorization") != "",
+			"Basic Auth User", username,
+			"Client Certificate", subject,
+		)
+
+		return next(ctx, r, aps, username, password)
 	}
 }

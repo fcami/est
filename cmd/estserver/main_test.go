@@ -29,6 +29,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,11 +42,14 @@ const testTimeout = time.Second * 10
 
 const (
 	healthCheckPath = "/healthcheck"
+	cacertsPath     = "/.well-known/est/cacerts"
 	enrollPath      = "/.well-known/est/simpleenroll"
 	enrollAPSPath   = "/.well-known/est/someaps/simpleenroll"
 	reenrollPath    = "/.well-known/est/simplereenroll"
 	keygenPath      = "/.well-known/est/serverkeygen"
 	healthCheckUser = "healthcheck"
+	clientAuthMsg   = "Client authentication"
+	requestIDField  = "HTTP Request ID"
 )
 
 // credentials contains HTTP Basic Authentication credentials.
@@ -298,6 +302,169 @@ func TestEnrollBasicAuth(t *testing.T) {
 	}
 }
 
+func TestClientAuthLog(t *testing.T) {
+	t.Parallel()
+
+	var testcases = []struct {
+		name       string
+		method     string
+		path       string
+		creds      *credentials
+		cert       bool
+		authorized bool
+		user       string
+		subject    string
+	}{
+		{
+			name:       "SimpleEnroll/Credentials",
+			method:     http.MethodPost,
+			path:       enrollPath,
+			creds:      enrollCreds,
+			authorized: true,
+			user:       enrollCreds.username,
+		},
+		{
+			name:       "SimpleEnroll/RejectedCredentials",
+			method:     http.MethodPost,
+			path:       enrollPath,
+			creds:      &credentials{"testuser", "hunter2"},
+			authorized: true,
+			user:       "testuser",
+		},
+		{
+			name:   "SimpleEnroll/NoCredentials",
+			method: http.MethodPost,
+			path:   enrollPath,
+		},
+		{
+			name:    "SimpleReenroll/Certificate",
+			method:  http.MethodPost,
+			path:    reenrollPath,
+			cert:    true,
+			subject: "CN=Test Reenroll",
+		},
+		{
+			name:       "HealthCheck/Credentials",
+			method:     http.MethodGet,
+			path:       healthCheckPath,
+			creds:      &credentials{healthCheckUser, enrollCfg.HealthCheckPassword},
+			authorized: true,
+			user:       healthCheckUser,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestServer(t, enrollCfg)
+			client, body := mustClientAndBody(t, s, tc.method, tc.cert)
+
+			doRequest(t, client, tc.method, s.URL+tc.path, tc.creds, body)
+
+			e := mustFindEntry(t, s.rec.snapshot(), clientAuthMsg)
+
+			if got := e.fields["Authorization Presented"]; got != tc.authorized {
+				t.Errorf("got Authorization Presented %v, want %v", got, tc.authorized)
+			}
+
+			if got := e.fields["Basic Auth User"]; got != tc.user {
+				t.Errorf("got Basic Auth User %q, want %q", got, tc.user)
+			}
+
+			if got := e.fields["Client Certificate"]; got != tc.subject {
+				t.Errorf("got Client Certificate %q, want %q", got, tc.subject)
+			}
+
+			if tc.creds != nil && strings.Contains(fmt.Sprint(s.rec.snapshot()), tc.creds.password) {
+				t.Fatalf("password %q found in log: %v", tc.creds.password, s.rec.snapshot())
+			}
+		})
+	}
+}
+
+func TestClientAuthLogOtherAuthorization(t *testing.T) {
+	t.Parallel()
+
+	var testcases = []struct {
+		name   string
+		header string
+		secret string
+	}{
+		{"UndecodableBasic", "Basic user:hunter2", "hunter2"},
+		{"Bearer", "Bearer hunter2", "hunter2"},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestServer(t, enrollCfg)
+
+			r, err := http.NewRequest(http.MethodGet, s.URL+healthCheckPath, nil)
+			if err != nil {
+				t.Fatalf("failed to create new HTTP request: %v", err)
+			}
+
+			r.Header.Set("Authorization", tc.header)
+
+			sendRequest(t, s.Client(), r)
+
+			e := mustFindEntry(t, s.rec.snapshot(), clientAuthMsg)
+
+			if got := e.fields["Authorization Presented"]; got != true {
+				t.Errorf("got Authorization Presented %v, want true", got)
+			}
+
+			if got := e.fields["Basic Auth User"]; got != "" {
+				t.Errorf("got Basic Auth User %q, want none", got)
+			}
+
+			if strings.Contains(fmt.Sprint(s.rec.snapshot()), tc.secret) {
+				t.Fatalf("secret %q found in log: %v", tc.secret, s.rec.snapshot())
+			}
+		})
+	}
+}
+
+func TestClientAuthLogRequestID(t *testing.T) {
+	t.Parallel()
+
+	s := newTestServer(t, &config{})
+
+	for _, cn := range []string{"Test Enroll 1", "Test Enroll 2"} {
+		doRequest(t, s.Client(), http.MethodPost, s.URL+enrollPath, nil, mustMakeBase64CSR(t, cn))
+	}
+
+	// /cacerts is not behind the check, so it must add no line.
+	doRequest(t, s.Client(), http.MethodGet, s.URL+cacertsPath, nil, nil)
+
+	// The library logs its "HTTP request" line when the handler returns,
+	// which can be after the client has the response. Close waits for it.
+	s.Close()
+
+	entries := s.rec.snapshot()
+
+	requestIDs := make(map[interface{}]bool)
+	for _, e := range findEntries(entries, "HTTP request") {
+		requestIDs[e.fields[requestIDField]] = true
+	}
+
+	var ids []interface{}
+	for _, e := range findEntries(entries, clientAuthMsg) {
+		id := e.fields[requestIDField]
+		if id == "" || !requestIDs[id] {
+			t.Errorf("got %s %q, want the ID of an HTTP request entry in %v", requestIDField, id, entries)
+		}
+
+		ids = append(ids, id)
+	}
+
+	if len(ids) != 2 || ids[0] == ids[1] {
+		t.Fatalf("got request IDs %q, want two different IDs", ids)
+	}
+}
+
 // doRequest sends a request, with the given Basic Authentication credentials
 // and base64-encoded PKCS#10 body if not nil, and returns the response status
 // code and body.
@@ -473,6 +640,30 @@ func (l *recordingLogger) record(msg string, keysAndValues ...interface{}) {
 	l.rec.entries = append(l.rec.entries, e)
 }
 
+// findEntries returns the entries with the given message.
+func findEntries(entries []logEntry, msg string) []logEntry {
+	var found []logEntry
+	for _, e := range entries {
+		if e.msg == msg {
+			found = append(found, e)
+		}
+	}
+
+	return found
+}
+
+// mustFindEntry returns the only entry with the given message.
+func mustFindEntry(t *testing.T, entries []logEntry, msg string) logEntry {
+	t.Helper()
+
+	found := findEntries(entries, msg)
+	if len(found) != 1 {
+		t.Fatalf("got %d %q entries, want 1: %v", len(found), msg, entries)
+	}
+
+	return found[0]
+}
+
 // testServer is an EST server started for a test.
 type testServer struct {
 	*httptest.Server
@@ -510,7 +701,7 @@ func newTestServer(t *testing.T, cfg *config) *testServer {
 		CA:             ca,
 		Timeout:        testTimeout,
 		Logger:         &recordingLogger{rec: rec},
-		CheckBasicAuth: newCheckBasicAuth(cfg),
+		CheckBasicAuth: logClientAuth(newCheckBasicAuth(cfg)),
 	})
 	if err != nil {
 		t.Fatalf("failed to create new router: %v", err)
