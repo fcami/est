@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Optional `enroll_basic_auth` section in the estserver configuration file,
+  which requires HTTP Basic Authentication for `/simpleenroll`.
 
 ## [1.0.6] - 2021-02-21
 ### Added

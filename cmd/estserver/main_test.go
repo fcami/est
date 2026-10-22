@@ -44,6 +44,7 @@ const (
 	enrollPath      = "/.well-known/est/simpleenroll"
 	enrollAPSPath   = "/.well-known/est/someaps/simpleenroll"
 	reenrollPath    = "/.well-known/est/simplereenroll"
+	keygenPath      = "/.well-known/est/serverkeygen"
 	healthCheckUser = "healthcheck"
 )
 
@@ -51,6 +52,19 @@ const (
 type credentials struct {
 	username string
 	password string
+}
+
+// enrollCreds are the credentials that enrollCfg requires to enroll.
+var enrollCreds = &credentials{"enroller", "plugh"}
+
+// enrollCfg is a configuration which requires enrollCreds to enroll. It is a
+// variable rather than a function because newCheckBasicAuth only reads it.
+var enrollCfg = &config{
+	HealthCheckPassword: "xyzzy",
+	EnrollBasicAuth: &enrollBasicAuthConfig{
+		Username: enrollCreds.username,
+		password: enrollCreds.password,
+	},
 }
 
 func TestCheckBasicAuth(t *testing.T) {
@@ -159,6 +173,121 @@ func TestCheckBasicAuth(t *testing.T) {
 			t.Parallel()
 
 			s := newTestServer(t, &config{HealthCheckPassword: tc.password})
+			client, body := mustClientAndBody(t, s, tc.method, tc.cert)
+
+			got, text := doRequest(t, client, tc.method, s.URL+tc.path, tc.creds, body)
+			if got != tc.status {
+				t.Fatalf("got status code %d, want %d; body: %q; log: %v", got, tc.status, text, s.rec.snapshot())
+			}
+		})
+	}
+}
+
+func TestEnrollBasicAuth(t *testing.T) {
+	t.Parallel()
+
+	var testcases = []struct {
+		name   string
+		method string
+		path   string
+		creds  *credentials
+		cert   bool
+		status int
+	}{
+		{
+			name:   "SimpleEnroll/NoCredentials",
+			method: http.MethodPost,
+			path:   enrollPath,
+			status: http.StatusUnauthorized,
+		},
+		{
+			name:   "SimpleEnroll/WrongUser",
+			method: http.MethodPost,
+			path:   enrollPath,
+			creds:  &credentials{"testuser", enrollCreds.password},
+			status: http.StatusUnauthorized,
+		},
+		{
+			name:   "SimpleEnroll/WrongPassword",
+			method: http.MethodPost,
+			path:   enrollPath,
+			creds:  &credentials{enrollCreds.username, "xyzzy"},
+			status: http.StatusUnauthorized,
+		},
+		{
+			name:   "SimpleEnroll/HealthCheckCredentials",
+			method: http.MethodPost,
+			path:   enrollPath,
+			creds:  &credentials{healthCheckUser, enrollCfg.HealthCheckPassword},
+			status: http.StatusUnauthorized,
+		},
+		{
+			name:   "SimpleEnroll/RightCredentials",
+			method: http.MethodPost,
+			path:   enrollPath,
+			creds:  enrollCreds,
+			status: http.StatusOK,
+		},
+		{
+			name:   "SimpleEnrollAPS/NoCredentials",
+			method: http.MethodPost,
+			path:   enrollAPSPath,
+			status: http.StatusUnauthorized,
+		},
+		{
+			name:   "SimpleEnrollAPS/RightCredentials",
+			method: http.MethodPost,
+			path:   enrollAPSPath,
+			creds:  enrollCreds,
+			status: http.StatusOK,
+		},
+		{
+			name:   "SimpleReenroll/CredentialsNoCertificate",
+			method: http.MethodPost,
+			path:   reenrollPath,
+			creds:  enrollCreds,
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "SimpleReenroll/CertificateNoCredentials",
+			method: http.MethodPost,
+			path:   reenrollPath,
+			cert:   true,
+			status: http.StatusOK,
+		},
+		{
+			name:   "HealthCheck/NoCredentials",
+			method: http.MethodGet,
+			path:   healthCheckPath,
+			status: http.StatusUnauthorized,
+		},
+		{
+			name:   "HealthCheck/EnrollCredentials",
+			method: http.MethodGet,
+			path:   healthCheckPath,
+			creds:  enrollCreds,
+			status: http.StatusUnauthorized,
+		},
+		{
+			name:   "HealthCheck/RightCredentials",
+			method: http.MethodGet,
+			path:   healthCheckPath,
+			creds:  &credentials{healthCheckUser, enrollCfg.HealthCheckPassword},
+			status: http.StatusOK,
+		},
+		{
+			name:   "ServerKeyGen/NoCredentials",
+			method: http.MethodPost,
+			path:   keygenPath,
+			status: http.StatusOK,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestServer(t, enrollCfg)
 			client, body := mustClientAndBody(t, s, tc.method, tc.cert)
 
 			got, text := doRequest(t, client, tc.method, s.URL+tc.path, tc.creds, body)

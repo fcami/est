@@ -45,6 +45,7 @@ const (
 	defaultListenAddr   = ":8443"
 	healthCheckUsername = "healthcheck"
 	healthCheckEndpoint = "/healthcheck"
+	enrollEndpoint      = "/simpleenroll"
 )
 
 func main() {
@@ -239,21 +240,31 @@ func main() {
 	s.Close()
 }
 
-// newCheckBasicAuth returns a function which requires a HTTP Basic
-// Authentication username of "healthcheck" and the password from the
-// configuration (no password if no configuration was provided) to access the
-// /healthcheck endpoint, and no username or password otherwise required.
+// newCheckBasicAuth returns a function which checks HTTP Basic
+// Authentication credentials. The /healthcheck endpoint requires a username
+// of "healthcheck" and the password from the configuration (no password if
+// no configuration was provided). If the configuration has an
+// enroll_basic_auth section, the /simpleenroll endpoint, with or without an
+// additional path segment, requires its username and password. No username
+// or password is otherwise required.
 func newCheckBasicAuth(
 	cfg *config,
 ) func(ctx context.Context, r *http.Request, aps, username, password string) error {
 	return func(ctx context.Context, r *http.Request, aps, username, password string) error {
-		if strings.ToLower(r.URL.Path) != healthCheckEndpoint {
-			return nil
-		}
+		path := strings.ToLower(r.URL.Path)
 
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != healthCheckUsername || pass != cfg.HealthCheckPassword {
-			return errors.New("authorization required")
+		switch {
+		case path == healthCheckEndpoint:
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != healthCheckUsername || pass != cfg.HealthCheckPassword {
+				return errors.New("authorization required")
+			}
+
+		case cfg.EnrollBasicAuth != nil && strings.HasSuffix(path, enrollEndpoint):
+			user, pass, ok := r.BasicAuth()
+			if !ok || user != cfg.EnrollBasicAuth.Username || pass != cfg.EnrollBasicAuth.password {
+				return errors.New("authorization required")
+			}
 		}
 
 		return nil
