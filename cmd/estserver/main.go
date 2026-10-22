@@ -203,23 +203,6 @@ func main() {
 		ClientCAs: clientCAs,
 	}
 
-	// Create a password function which requires a HTTP Basic Authentication
-	// username of "healthcheck" and the password from the configuration (no
-	// password if no configuration was provided) to access the /healthcheck
-	// endpoint, and no username or password otherwise required.
-	pwfunc := func(ctx context.Context, r *http.Request, aps, username, password string) error {
-		if strings.ToLower(r.URL.Path) != healthCheckEndpoint {
-			return nil
-		}
-
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != healthCheckUsername || pass != cfg.HealthCheckPassword {
-			return errors.New("authorization required")
-		}
-
-		return nil
-	}
-
 	// Create server mux.
 	r, err := est.NewRouter(&est.ServerConfig{
 		CA:             ca,
@@ -227,7 +210,7 @@ func main() {
 		AllowedHosts:   cfg.AllowedHosts,
 		Timeout:        time.Duration(cfg.Timeout) * time.Second,
 		RateLimit:      cfg.RateLimit,
-		CheckBasicAuth: pwfunc,
+		CheckBasicAuth: newCheckBasicAuth(cfg),
 	})
 	if err != nil {
 		log.Fatalf("failed to create new EST router: %v", err)
@@ -254,4 +237,25 @@ func main() {
 	logger.Infof("Closing EST server with signal %v", got)
 
 	s.Close()
+}
+
+// newCheckBasicAuth returns a function which requires a HTTP Basic
+// Authentication username of "healthcheck" and the password from the
+// configuration (no password if no configuration was provided) to access the
+// /healthcheck endpoint, and no username or password otherwise required.
+func newCheckBasicAuth(
+	cfg *config,
+) func(ctx context.Context, r *http.Request, aps, username, password string) error {
+	return func(ctx context.Context, r *http.Request, aps, username, password string) error {
+		if strings.ToLower(r.URL.Path) != healthCheckEndpoint {
+			return nil
+		}
+
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != healthCheckUsername || pass != cfg.HealthCheckPassword {
+			return errors.New("authorization required")
+		}
+
+		return nil
+	}
 }
